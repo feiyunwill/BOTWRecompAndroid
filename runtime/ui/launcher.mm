@@ -2193,7 +2193,7 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x, cy), ImVec2(x + u * 0.35f, cy + u * 0.35f), g, fs * 0.11f);
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
-                std::string src_d = tr("The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Breath of "
+                std::string src_d = tr("The folder with your own game folders (exefs/romfs, or exefs and a romfs.bin) of The Legend of Zelda: Breath of "
                                        "the Wild for Nintendo Switch: version 1.0.0, 1.6.0, 1.8.2 or 1.9.0 (the last two in "
                                        "Brazilian Portuguese). The version is told from the files, and each one is set up in a place of "
                                        "its own, beside the others. The game isn't included with BOTWRecompAndroid.");
