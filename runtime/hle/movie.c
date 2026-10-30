@@ -15,9 +15,12 @@
 #include <libavutil/time.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <unistd.h>
 
 #include "../hle.h"
 #include "../settings.h"
@@ -270,9 +273,29 @@ static void ex_set_data_source(Cpu *c) {
         if (slash) snprintf(host, sizeof host, "%.*s/romfs/%s", (int)(slash - aoc), aoc, rel ? rel : "");
     }
     LOG("[movie] open %s -> %s\n", path ? path : "(null)", host);
+    if (getenv("LARECOMP_MOVIE_MISSING") && strstr(host, getenv("LARECOMP_MOVIE_MISSING")))  // (test: a movie the dump lacks)
+        snprintf(host, sizeof host, "%s/missing.webm", g_romfs_dir);
+    else if (access(host, R_OK) != 0) {  // (a player's own romfs/ used in place: its names' case may differ - Android minds)
+        char *slash = strrchr(host, '/');
+        DIR *dir = NULL;
+        if (slash) { *slash = 0; dir = opendir(host); *slash = '/'; }
+        for (struct dirent *de; dir && (de = readdir(dir));)
+            if (!strcasecmp(de->d_name, slash + 1)) {
+                snprintf(slash + 1, sizeof host - (size_t)(slash + 1 - host), "%s", de->d_name);
+                LOG("[movie] found as %s\n", host);
+                break;
+            }
+        if (dir) closedir(dir);
+    }
     if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
-        LOG("[movie] cannot open %s\n", host);
-        c->x[0] = 1;
+        // An error here crashed the game moments later (#113: the Zora's Domain cutscene): it never sees one on the
+        // Switch. Opened with no tracks instead, the movie ends at once and the game goes on.
+        LOG("[movie] cannot open %s: skipped as an empty movie\n", host);
+        if (e->fmt) avformat_close_input(&e->fmt);
+        e->ntracks = 0;
+        e->eof = true;
+        e->skippable = false;
+        c->x[0] = 0;
         return;
     }
     e->pkt = av_packet_alloc();
