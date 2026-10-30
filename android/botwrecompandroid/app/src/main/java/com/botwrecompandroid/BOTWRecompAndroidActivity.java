@@ -843,7 +843,11 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         }
         if (exefs == null && named(kids, "main") != null && named(kids, "main.npdm") != null) exefs = dir;
         Doc rc = named(kids, "Pack");
-        if (romfs == null && rc != null && rc.dir) romfs = dir;
+        boolean anyRomfs = rc != null && rc.dir;
+        if (romfs == null && anyRomfs) {  // (the game's has System/Version.txt; the DLC's, also with Pack, has
+            Doc sys = named(kids, "System");  //  AocVersion.txt there instead - taken for the game's: issue #87)
+            if (sys != null && sys.dir && named(children(tree, sys.id), "Version.txt") != null) romfs = dir;
+        }
         Doc ri = named(kids, "romfs.bin");
         if (romfsImage == null && ri != null && !ri.dir) {
             romfsImage = ri;
@@ -851,7 +855,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         }
         // (romfs/'s own folders hold no exefs: through the file provider, listing their ~40000 files took long enough
         // for the setup to look stuck - issue #17)
-        if (dir == romfs || dir == exefs) return;
+        if (anyRomfs || dir == exefs) return;
         for (Doc k : kids) {
             String n = k.name == null ? "" : k.name.toLowerCase();
             if (n.endsWith(".nsp") || n.endsWith(".xci") || n.endsWith(".nca") || n.endsWith(".nsz") || n.endsWith(".xcz")) packages = true;
