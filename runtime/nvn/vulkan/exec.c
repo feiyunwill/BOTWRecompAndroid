@@ -1,6 +1,7 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
+#include <ctype.h>
 #include <float.h>
 #include <math.h>
 #include <stdarg.h>
@@ -2461,8 +2462,8 @@ static void translate_program(void *arg) {
             while (*e == '+' || *e == ',') e++;
         }
         if (hit) {
-            char path[96];
-            snprintf(path, sizeof path, "build/fs_%016llx.glsl", (unsigned long long)h);
+            char path[96];  // (one file per vertex shader: an effect's fragment shader is shared by many)
+            snprintf(path, sizeof path, "build/fs_%016llx_vs%llx.glsl", (unsigned long long)h, (unsigned long long)p->code[0]);
             FILE *f = fopen(path, "wb");
             if (f) {
                 fprintf(f, "// fragment shader %016llx (code %llx)\n%s\n// ---- vertex shader (code %llx)\n%s\n",
@@ -5699,6 +5700,30 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
+        {   // LARECOMP_SKIPVS=1 (diagnosis): build/skipvs.txt lists vertex shader code addresses ("3da039b00,3da258600";
+            // empty: none) whose draws are skipped - re-read twice a second, so a draw can be found by toggling it while
+            // the game runs
+            static uint64_t vskip[32], vskip_frame = ~0ull;
+            static int nvskip, vskip_on = -1;
+            if (vskip_on < 0) vskip_on = getenv("LARECOMP_SKIPVS") != NULL;
+            uint64_t now = renderer_present_count();
+            if (vskip_on && now / 15 != vskip_frame) {
+                vskip_frame = now / 15;
+                char buf[512] = "";
+                FILE *f = fopen("build/skipvs.txt", "rb");
+                if (f) { buf[fread(buf, 1, sizeof buf - 1, f)] = 0; fclose(f); }
+                int n = 0;
+                for (const char *p = buf; *p && n < 32;) {
+                    while (*p && !isxdigit((unsigned char)*p)) p++;
+                    if (!*p) break;
+                    vskip[n++] = strtoull(p, (char **)&p, 16);
+                }
+                if (n != nvskip) LOG("[vk] skipvs: %d vertex shaders skipped\n", n);
+                nvskip = n;
+            }
+            for (int i = 0; i < nvskip; i++)
+                if (st.program->stages[0].code_addr == vskip[i]) { stat_skipped++; return; }
+        }
         {   // LARECOMP_LOG_FS_VB=<fs hash>:<stream> (diagnosis): that vertex stream's first 4 floats for the first draw of
             // that fragment shader each frame, as the draw reads them (beside LARECOMP_LOG_FS_CB: a per-instance
             // value and a constant that should change in the same frame)
@@ -6458,7 +6483,8 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
                     sn < (uint32_t)st.nstream ? st.stream[sn][0] : 0, sn < (uint32_t)st.nstream ? st.stream[sn][1] : 0,
                     sn < 16 ? (unsigned long long)st.vbuf[sn].addr : 0ull, sn < 16 ? (unsigned long long)st.vbuf[sn].size : 0ull);
             }
-    if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
+    if (getenv("LARECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats (=2: vertex cbufs whole)
+        int full = atoi(getenv("LARECOMP_DEBUG_DATA")) >= 2;
         LOG("[draw]   depth range %.9g %.9g offset enables %#x factor %.9g units %.9g clamp %.9g\n",
             st.depth_range[0][0], st.depth_range[0][1], st.poly[3], st.poly_offset[0], st.poly_offset[1], st.poly_offset[2]);
         for (int c = 0; c < 18; c++) {
@@ -6469,7 +6495,39 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             if (!r.addr) continue;
             const float *u = (const float *)(uintptr_t)r.addr;
             LOG("[draw]   vcb%d %llx size %u:", c, (unsigned long long)r.addr, (unsigned)r.size);
-            for (int k = 0; k < 160 && k * 4 < (int)r.size; k++) LOG(" %.9g", u[k]);
+            for (int k = 0; k < (full ? 16384 : 160) && k * 4 < (int)r.size; k++) LOG(" %.9g", u[k]);
+            LOG("\n");
+        }
+        for (int i = 0; full && i < 16 && i < st.nattrib; i++) {  // integer attributes (bone indices): their range
+            uint32_t a = st.attrib[i], f = a & 0xFF, sn = (a >> 8) & 0x1F, n = f == 0x27 ? 4 : f == 0x0F ? 2 : f == 0x03 ? 1 : 0;
+            if (!(pr->vi->attr_mask & (1u << i)) || sn >= 16 || sn >= (uint32_t)st.nstream || !st.vbuf[sn].addr) continue;
+            uint64_t stride = st.stream[sn][0], nv = stride ? st.vbuf[sn].size / stride : 0;
+            const uint8_t *p = (const uint8_t *)(uintptr_t)st.vbuf[sn].addr + (a >> 13);
+            if (f == 0x25 || f == 0x0D) {  // (weights: vertices whose weights add up to nothing)
+                uint32_t w = f == 0x25 ? 4 : 2;
+                uint64_t z = 0, off3 = 0, off4 = 0;
+                for (uint64_t v = 0; v < nv; v++) {
+                    unsigned s = 0, s3 = 0;
+                    for (uint32_t k = 0; k < w; k++) s += p[v * stride + k], s3 += k < 3 ? p[v * stride + k] : 0;
+                    z += s == 0;
+                    off4 += s < 252 || s > 258;
+                    if (w != 4 || (s3 >= 252 && s3 <= 258)) continue;
+                    if (off3++ < 4) {  // (the vertex's whole record: its indices beside)
+                        LOG("[draw]   attr%d vertex %llu:", i, (unsigned long long)v);
+                        for (uint64_t k = 0; k < stride && k < 16; k++) LOG(" %u", ((const uint8_t *)(uintptr_t)st.vbuf[sn].addr)[v * stride + k]);
+                        LOG("\n");
+                    }
+                }
+                LOG("[draw]   attr%d unorm: %llu vertices, %llu with all-zero weights, %llu whose first 3 don't add to 1, %llu all 4\n",
+                    i, (unsigned long long)nv, (unsigned long long)z, (unsigned long long)off3, (unsigned long long)off4);
+                continue;
+            }
+            if (!n) continue;
+            unsigned mx = 0, hist[256] = {0};
+            for (uint64_t v = 0; v < nv; v++)
+                for (uint32_t k = 0; k < n; k++) { unsigned b = p[v * stride + k]; hist[b]++; if (b > mx) mx = b; }
+            LOG("[draw]   attr%d ints: %llu vertices, max %u, values used:", i, (unsigned long long)nv, mx);
+            for (unsigned b = 0; b < 256; b++) if (hist[b]) LOG(" %u", b);
             LOG("\n");
         }
         for (int s = 0; s < 8; s++) {  // (2 to 7: per-instance streams - a particle's own values)
